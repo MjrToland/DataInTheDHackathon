@@ -13,7 +13,6 @@ LANG_NAMES = {
     "pt": "Português",
     "de": "Deutsch",
     "ko": "한국어",
-    "vi": "Tiếng Việt",
     "ja": "日本語"
 }
 
