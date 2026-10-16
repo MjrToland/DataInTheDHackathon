@@ -4,6 +4,7 @@ Landing page with role selection: Provider, Patient, or Admin (demo) mode.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
+from utils.sidebar import render_sidebar
 
 st.set_page_config(
     page_title="Drug Interaction Intelligence",
@@ -13,35 +14,7 @@ st.set_page_config(
 )
 
 session = get_active_session()
-
-
-def logout():
-    for key in ["role", "provider_id", "provider_name", "patient_id", "patient_name", "patient_lang"]:
-        st.session_state.pop(key, None)
-
-
-def show_sidebar():
-    role = st.session_state.get("role")
-    st.sidebar.title("Drug Interaction Intelligence")
-    st.sidebar.markdown("---")
-
-    if role == "provider":
-        st.sidebar.markdown(f"**Logged in as Provider**")
-        st.sidebar.markdown(f"{st.session_state.get('provider_name', '')}")
-    elif role == "patient":
-        st.sidebar.markdown(f"**Logged in as Patient**")
-        st.sidebar.markdown(f"{st.session_state.get('patient_name', '')}")
-    elif role == "admin":
-        st.sidebar.markdown("**Admin / Demo Mode**")
-
-    if role:
-        if st.sidebar.button("Log out"):
-            logout()
-            st.rerun()
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**DataInTheD Hackathon 2026**")
-    st.sidebar.caption("Cortex Agents | Semantic Views | Cortex Search | AI_TRANSLATE | Restricted Caller's Rights")
+lang = render_sidebar(session)
 
 
 def show_login():
@@ -76,14 +49,32 @@ def show_login():
             st.session_state["role"] = "provider"
             st.session_state["provider_id"] = int(row["PROVIDER_ID"])
             st.session_state["provider_name"] = row["NAME"]
-            st.rerun()
+            st.experimental_rerun()
 
     # --- Patient login ---
     with col_pat:
         st.subheader("I'm a Patient")
         st.markdown("View your medications and safety information in your language.")
 
-        last_name = st.text_input("Last Name", key="pat_last")
+        if "suggested_patient" not in st.session_state:
+            suggested = session.sql("""
+                SELECT p.FIRST_NAME, p.LAST_NAME, p.DATE_OF_BIRTH
+                FROM HEALTHCARE_DW.CORE.PATIENTS p
+                ORDER BY RANDOM()
+                LIMIT 1
+            """).to_pandas()
+            if not suggested.empty:
+                st.session_state["suggested_patient"] = {
+                    "last_name": suggested.iloc[0]["LAST_NAME"],
+                    "dob": str(suggested.iloc[0]["DATE_OF_BIRTH"]),
+                    "first_name": suggested.iloc[0]["FIRST_NAME"],
+                }
+
+        hint = st.session_state.get("suggested_patient", {})
+        if hint:
+            st.info(f"Try: **{hint.get('first_name', '')} {hint.get('last_name', '')}**, DOB **{hint.get('dob', '')}**")
+
+        last_name = st.text_input("Last Name", value=hint.get("last_name", ""), key="pat_last")
         dob = st.date_input("Date of Birth", value=None, key="pat_dob")
 
         if st.button("Sign in as Patient", type="primary", key="btn_pat"):
@@ -107,7 +98,7 @@ def show_login():
                     st.session_state["patient_id"] = int(row["PATIENT_ID"])
                     st.session_state["patient_name"] = f"{row['FIRST_NAME']} {row['LAST_NAME']}"
                     st.session_state["patient_lang"] = row["PREFERRED_LANGUAGE"]
-                    st.rerun()
+                    st.experimental_rerun()
             else:
                 st.warning("Enter both last name and date of birth.")
 
@@ -118,16 +109,13 @@ def show_login():
 
         if st.button("Enter Admin Mode", key="btn_admin"):
             st.session_state["role"] = "admin"
-            st.rerun()
+            st.experimental_rerun()
 
 
 def show_dashboard():
-    role = st.session_state.get("role")
-
     st.title("Drug Interaction Intelligence Platform")
     st.caption("Drug interaction data is AI-generated and not clinically validated.")
 
-    # Quick stats
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -160,7 +148,6 @@ def show_dashboard():
 
     st.markdown("---")
 
-    # Severity distribution
     st.subheader("Interaction Severity Distribution")
     severity_df = session.sql("""
         SELECT SEVERITY, COUNT(*) AS COUNT
@@ -174,7 +161,6 @@ def show_dashboard():
     if not severity_df.empty:
         st.bar_chart(severity_df.set_index("SEVERITY"))
 
-    # Top interaction pairs
     st.subheader("Most Common Dangerous Drug Pairs")
     top_pairs = session.sql("""
         SELECT
@@ -190,21 +176,10 @@ def show_dashboard():
     """).to_pandas()
 
     if not top_pairs.empty:
-        st.dataframe(top_pairs, use_container_width=True, hide_index=True)
-
-    # Navigation hints based on role
-    st.markdown("---")
-    if role == "provider":
-        st.info("Use the sidebar to navigate to your **Provider Dashboard**, **Chat**, or **Inbox Triage**.")
-    elif role == "patient":
-        st.info("Use the sidebar to navigate to your **Patient Portal** or **Chat**.")
-    elif role == "admin":
-        st.info("Admin mode: all pages are accessible from the sidebar.")
+        st.dataframe(top_pairs, use_container_width=True)
 
 
 # --- Main ---
-show_sidebar()
-
 if st.session_state.get("role"):
     show_dashboard()
 else:

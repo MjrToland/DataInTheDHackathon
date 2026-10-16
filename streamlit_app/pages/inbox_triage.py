@@ -5,13 +5,18 @@ auto-generating email drafts for critical alerts.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
+from utils.sidebar import render_sidebar
 
 st.set_page_config(page_title="Inbox Triage", page_icon="📋", layout="wide")
 session = get_active_session()
+render_sidebar(session)
 
 role = st.session_state.get("role")
 if role not in ("provider", "admin"):
-    st.warning("Please sign in as a provider or admin from the home page.")
+    if role == "patient":
+        st.error("This page is for providers. Please use the Patient Portal or Interaction Checker.")
+    else:
+        st.warning("Please sign in as a provider or admin from the home page.")
     st.stop()
 
 st.title("Inbox Triage")
@@ -77,7 +82,7 @@ with tab_pending:
                         "CALL HEALTHCARE_DW.DDI_APP.GENERATE_INTERACTION_ALERTS()"
                     ).collect()
                     st.success("Email drafts generated. Check the Sent Alerts tab.")
-                    st.rerun()
+                    st.experimental_rerun()
 
             for _, row in pending.iterrows():
                 sev = row["SEVERITY"]
@@ -105,7 +110,7 @@ with tab_sent:
     if sent.empty:
         st.info("No alerts have been drafted yet.")
     else:
-        st.dataframe(sent, use_container_width=True, hide_index=True)
+        st.dataframe(sent, use_container_width=True)
 
 with tab_stats:
     st.subheader("Alert Statistics")
@@ -124,7 +129,7 @@ with tab_stats:
                 WHEN 'MODERATE' THEN 3 ELSE 4 END
         """).to_pandas()
         if not by_sev.empty:
-            st.dataframe(by_sev, use_container_width=True, hide_index=True)
+            st.dataframe(by_sev, use_container_width=True)
 
     with col2:
         st.markdown("**Top Drug Pairs by Alert Count**")
@@ -139,11 +144,10 @@ with tab_stats:
             LIMIT 10
         """).to_pandas()
         if not top_pairs.empty:
-            st.dataframe(top_pairs, use_container_width=True, hide_index=True)
+            st.dataframe(top_pairs, use_container_width=True)
 
     st.markdown("---")
 
-    # Email subscription stats
     st.markdown("**Provider Email Subscriptions**")
     sub_stats = session.sql("""
         SELECT

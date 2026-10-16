@@ -4,9 +4,11 @@ sorted by severity. Includes email alert sign-up.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
+from utils.sidebar import render_sidebar
 
 st.set_page_config(page_title="Provider Dashboard", page_icon="🩺", layout="wide")
 session = get_active_session()
+render_sidebar(session)
 
 role = st.session_state.get("role")
 provider_id = st.session_state.get("provider_id")
@@ -14,7 +16,7 @@ provider_id = st.session_state.get("provider_id")
 # --- Provider resolution ---
 if role == "provider" and provider_id:
     provider_name = st.session_state.get("provider_name", "")
-    st.title(f"Provider Dashboard")
+    st.title("Provider Dashboard")
     st.markdown(f"**{provider_name}**")
 elif role == "admin":
     st.title("Provider Dashboard (Admin)")
@@ -27,7 +29,10 @@ elif role == "admin":
     if selected:
         provider_id = int(providers[providers["DISPLAY"] == selected]["PROVIDER_ID"].iloc[0])
 else:
-    st.warning("Please sign in as a provider or admin from the home page.")
+    if role == "patient":
+        st.error("This page is for providers. Please use the Patient Portal or Interaction Checker.")
+    else:
+        st.warning("Please sign in as a provider or admin from the home page.")
     st.stop()
 
 st.caption("Drug interaction data is AI-generated and not clinically validated.")
@@ -55,7 +60,7 @@ if sub.empty:
                         params=[provider_id, email_input]
                     ).collect()
                     st.success(f"Subscribed! Alerts will be sent to {email_input}")
-                    st.rerun()
+                    st.experimental_rerun()
                 else:
                     st.error("Enter a valid email address.")
 elif sub.iloc[0]["SUBSCRIBED"]:
@@ -68,7 +73,7 @@ elif sub.iloc[0]["SUBSCRIBED"]:
                 "UPDATE HEALTHCARE_DW.DDI_APP.PROVIDER_EMAIL_SUBSCRIPTIONS SET SUBSCRIBED = FALSE WHERE PROVIDER_ID = ?",
                 params=[provider_id]
             ).collect()
-            st.rerun()
+            st.experimental_rerun()
 else:
     col_info, col_resub = st.columns([4, 1])
     with col_info:
@@ -79,7 +84,7 @@ else:
                 "UPDATE HEALTHCARE_DW.DDI_APP.PROVIDER_EMAIL_SUBSCRIPTIONS SET SUBSCRIBED = TRUE WHERE PROVIDER_ID = ?",
                 params=[provider_id]
             ).collect()
-            st.rerun()
+            st.experimental_rerun()
 
 st.markdown("---")
 

@@ -1,9 +1,11 @@
 """
 Patient Portal — Personalized view showing current medications,
 flagged interactions, and translated summaries in the patient's language.
+Full-page translation when language is not English.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
+from utils.sidebar import render_sidebar, translate
 
 st.set_page_config(page_title="Patient Portal", page_icon="👤", layout="wide")
 session = get_active_session()
@@ -11,19 +13,14 @@ session = get_active_session()
 role = st.session_state.get("role")
 pid = st.session_state.get("patient_id")
 patient_name = st.session_state.get("patient_name", "")
-lang = st.session_state.get("patient_lang", "en")
+default_lang = st.session_state.get("patient_lang", "en")
 
-LANG_NAMES = {
-    "en": "English", "es": "Spanish", "ar": "Arabic", "zh": "Chinese",
-    "fr": "French", "pt": "Portuguese", "de": "German", "ko": "Korean",
-    "vi": "Vietnamese", "ja": "Japanese"
-}
+lang = render_sidebar(session, show_language=True)
 
 # --- Patient resolution ---
 if role == "patient" and pid:
-    st.title("Patient Portal")
-    st.markdown(f"### Welcome, {patient_name}")
-    st.markdown(f"**Language preference:** {LANG_NAMES.get(lang, lang)}")
+    st.title(translate("Patient Portal", lang, session))
+    st.markdown(f"### {translate('Welcome', lang, session)}, {patient_name}")
 elif role == "admin":
     st.title("Patient Portal (Admin)")
     st.markdown("Look up any patient by last name and date of birth.")
@@ -48,27 +45,22 @@ elif role == "admin":
         row = patients.iloc[0]
         pid = int(row["PATIENT_ID"])
         patient_name = f"{row['FIRST_NAME']} {row['LAST_NAME']}"
-        lang = row["PREFERRED_LANGUAGE"]
         st.markdown(f"### {patient_name}")
     else:
         st.stop()
 else:
-    st.warning("Please sign in as a patient or admin from the home page.")
+    if role == "provider":
+        st.error("This page is for patients. Please use the Provider Dashboard.")
+    else:
+        st.warning("Please sign in as a patient or admin from the home page.")
     st.stop()
 
-st.caption("Drug interaction data is AI-generated and not clinically validated.")
-
-lang_override = st.selectbox(
-    "Display language",
-    list(LANG_NAMES.keys()),
-    format_func=lambda x: LANG_NAMES[x],
-    index=list(LANG_NAMES.keys()).index(lang) if lang in LANG_NAMES else 0
-)
+st.caption(translate("Drug interaction data is AI-generated and not clinically validated.", lang, session))
 
 st.markdown("---")
 
 # --- Current medications ---
-st.subheader("Your Current Medications")
+st.subheader(translate("Your Current Medications", lang, session))
 meds = session.sql(
     """SELECT
         rx.MEDICATION_NAME, m.DRUG_CLASS, rx.DOSAGE, rx.FREQUENCY,
@@ -84,14 +76,14 @@ meds = session.sql(
 ).to_pandas()
 
 if not meds.empty:
-    st.dataframe(meds, use_container_width=True, hide_index=True)
+    st.dataframe(meds, use_container_width=True)
 else:
-    st.info("No active medications found.")
+    st.info(translate("No active medications found.", lang, session))
 
 st.markdown("---")
 
 # --- Drug interaction alerts ---
-st.subheader("Safety Alerts")
+st.subheader(translate("Safety Alerts", lang, session))
 alerts = session.sql(
     """SELECT INTERACTION_ID, DRUG_A_NAME, DRUG_B_NAME, SEVERITY,
               PATIENT_SUMMARY, MANAGEMENT, ALTERNATIVE_FOR_A, ALTERNATIVE_FOR_B
@@ -102,34 +94,36 @@ alerts = session.sql(
 ).to_pandas()
 
 if alerts.empty:
-    st.success("No drug interaction alerts for your current medications.")
+    st.success(translate("No drug interaction alerts for your current medications.", lang, session))
 else:
-    st.warning(f"**{len(alerts)} interaction(s) detected** in your current medications.")
+    st.warning(translate(f"{len(alerts)} interaction(s) detected in your current medications.", lang, session))
+
+    # Translate labels once
+    lbl_what = translate("What this means", lang, session)
+    lbl_todo = translate("What to do", lang, session)
+    lbl_alt = translate("Possible alternative for", lang, session)
+    lbl_consult = translate("Always consult your healthcare provider before making any changes to your medications.", lang, session)
+    lbl_ai = translate("Drug interaction data is AI-generated and not clinically validated.", lang, session)
 
     for _, alert in alerts.iterrows():
         sev = alert["SEVERITY"]
         icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MODERATE": "🟡", "LOW": "🟢"}.get(sev, "⚪")
 
         with st.expander(f"{icon} {sev}: {alert['DRUG_A_NAME']} + {alert['DRUG_B_NAME']}"):
-            summary = alert["PATIENT_SUMMARY"] or ""
-            mgmt = alert["MANAGEMENT"] or ""
+            summary = translate(alert["PATIENT_SUMMARY"] or "", lang, session)
+            mgmt = translate(alert["MANAGEMENT"] or "", lang, session)
 
-            if lang_override != "en" and summary:
-                translated = session.sql(
-                    "SELECT AI_TRANSLATE(?, 'en', ?) AS T_SUMMARY, AI_TRANSLATE(?, 'en', ?) AS T_MGMT",
-                    params=[summary, lang_override, mgmt, lang_override]
-                ).to_pandas()
-                summary = translated["T_SUMMARY"].iloc[0]
-                mgmt = translated["T_MGMT"].iloc[0]
+            st.markdown(f"**{lbl_what}:** {summary}")
+            st.markdown(f"**{lbl_todo}:** {mgmt}")
 
-            st.markdown(f"**What this means:** {summary}")
-            st.markdown(f"**What to do:** {mgmt}")
+            alt_a = translate(alert["ALTERNATIVE_FOR_A"] or "", lang, session)
+            alt_b = translate(alert["ALTERNATIVE_FOR_B"] or "", lang, session)
 
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown(f"**Possible alternative for {alert['DRUG_A_NAME']}:** {alert['ALTERNATIVE_FOR_A']}")
+                st.markdown(f"**{lbl_alt} {alert['DRUG_A_NAME']}:** {alt_a}")
             with col2:
-                st.markdown(f"**Possible alternative for {alert['DRUG_B_NAME']}:** {alert['ALTERNATIVE_FOR_B']}")
+                st.markdown(f"**{lbl_alt} {alert['DRUG_B_NAME']}:** {alt_b}")
 
-            st.caption("Always consult your healthcare provider before making any changes.")
-            st.caption("Drug interaction data is AI-generated and not clinically validated.")
+            st.caption(lbl_consult)
+            st.caption(lbl_ai)
