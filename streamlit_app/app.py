@@ -113,9 +113,116 @@ def show_login():
 
 
 def show_dashboard():
+    role = st.session_state.get("role")
     st.title("Drug Interaction Intelligence Platform")
     st.caption("Drug interaction data is AI-generated and not clinically validated.")
 
+    if role == "patient":
+        show_patient_dashboard()
+    elif role == "provider":
+        show_provider_dashboard()
+    else:
+        show_admin_dashboard()
+
+
+def show_patient_dashboard():
+    pid = st.session_state.get("patient_id")
+    name = st.session_state.get("patient_name", "")
+    st.markdown(f"### {name}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        result = session.sql(
+            """SELECT COUNT(DISTINCT MEDICATION_ID)
+               FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS
+               WHERE PATIENT_ID = ? AND STATUS = 'FILLED'""",
+            params=[pid]
+        ).collect()
+        st.metric("Your Medications", f"{result[0][0]:,}")
+    with col2:
+        result = session.sql(
+            """SELECT COUNT(*)
+               FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
+               WHERE PATIENT_ID = ? AND SEVERITY IN ('CRITICAL', 'HIGH')""",
+            params=[pid]
+        ).collect()
+        st.metric("Interactions to Review", f"{result[0][0]:,}")
+
+    st.markdown("---")
+    st.subheader("Your Drug Interaction Alerts")
+    alerts = session.sql(
+        """SELECT DRUG_A_NAME, DRUG_B_NAME, SEVERITY, PATIENT_SUMMARY
+           FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
+           WHERE PATIENT_ID = ?
+           ORDER BY CASE SEVERITY WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
+                    WHEN 'MODERATE' THEN 3 ELSE 4 END""",
+        params=[pid]
+    ).to_pandas()
+
+    if alerts.empty:
+        st.success("No drug interaction alerts for your current medications.")
+    else:
+        for _, a in alerts.iterrows():
+            icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MODERATE": "🟡", "LOW": "🟢"}.get(a["SEVERITY"], "⚪")
+            with st.expander(f"{icon} {a['SEVERITY']}: {a['DRUG_A_NAME']} + {a['DRUG_B_NAME']}"):
+                st.markdown(a["PATIENT_SUMMARY"] or "")
+
+
+def show_provider_dashboard():
+    provider_id = st.session_state.get("provider_id")
+    name = st.session_state.get("provider_name", "")
+    st.markdown(f"### {name}")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        result = session.sql(
+            """SELECT COUNT(DISTINCT PATIENT_ID)
+               FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
+               WHERE PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?""",
+            params=[provider_id, provider_id]
+        ).collect()
+        st.metric("Your Patients at Risk", f"{result[0][0]:,}")
+    with col2:
+        result = session.sql(
+            """SELECT COUNT(*)
+               FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
+               WHERE (PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?)
+                 AND SEVERITY IN ('CRITICAL', 'HIGH')""",
+            params=[provider_id, provider_id]
+        ).collect()
+        st.metric("Critical/High Alerts", f"{result[0][0]:,}")
+    with col3:
+        result = session.sql(
+            """SELECT COUNT(*)
+               FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG
+               WHERE PROVIDER_ID = ?""",
+            params=[provider_id]
+        ).collect()
+        st.metric("Alerts Drafted", f"{result[0][0]:,}")
+
+    st.markdown("---")
+    st.subheader("Top Interactions in Your Panel")
+    top = session.sql(
+        """SELECT
+            DRUG_A_NAME || ' + ' || DRUG_B_NAME AS DRUG_PAIR,
+            SEVERITY,
+            COUNT(DISTINCT PATIENT_ID) AS AFFECTED_PATIENTS
+        FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
+        WHERE (PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?)
+          AND SEVERITY IN ('CRITICAL', 'HIGH')
+        GROUP BY DRUG_A_NAME, DRUG_B_NAME, SEVERITY
+        ORDER BY AFFECTED_PATIENTS DESC
+        LIMIT 10""",
+        params=[provider_id, provider_id]
+    ).to_pandas()
+
+    if top.empty:
+        st.success("No critical or high-severity interactions in your patient panel.")
+    else:
+        st.dataframe(top, use_container_width=True)
+
+
+def show_admin_dashboard():
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -124,14 +231,12 @@ def show_dashboard():
             FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS WHERE STATUS = 'FILLED'
         """).collect()
         st.metric("Patients on Meds", f"{result[0][0]:,}")
-
     with col2:
         result = session.sql("""
             SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.DRUG_INTERACTIONS
             WHERE SEVERITY IN ('CRITICAL', 'HIGH')
         """).collect()
         st.metric("High-Risk Interactions", f"{result[0][0]:,}")
-
     with col3:
         result = session.sql("""
             SELECT COUNT(DISTINCT PATIENT_ID)
@@ -139,7 +244,6 @@ def show_dashboard():
             WHERE SEVERITY IN ('CRITICAL', 'HIGH')
         """).collect()
         st.metric("Patients at Risk", f"{result[0][0]:,}")
-
     with col4:
         result = session.sql("""
             SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG
@@ -147,7 +251,6 @@ def show_dashboard():
         st.metric("Alerts Drafted", f"{result[0][0]:,}")
 
     st.markdown("---")
-
     st.subheader("Interaction Severity Distribution")
     severity_df = session.sql("""
         SELECT SEVERITY, COUNT(*) AS COUNT
@@ -157,7 +260,6 @@ def show_dashboard():
             WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
             WHEN 'MODERATE' THEN 3 ELSE 4 END
     """).to_pandas()
-
     if not severity_df.empty:
         st.bar_chart(severity_df.set_index("SEVERITY"))
 
@@ -174,7 +276,6 @@ def show_dashboard():
         ORDER BY AFFECTED_PATIENTS DESC
         LIMIT 10
     """).to_pandas()
-
     if not top_pairs.empty:
         st.dataframe(top_pairs, use_container_width=True)
 
