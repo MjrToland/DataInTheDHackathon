@@ -1,0 +1,12 @@
+version: 1
+artifacts:
+  - path: ..\test_agent.yaml
+    type: cortex_agent
+    targets:
+      default:
+        object: HEALTHCARE_DW.DDI_APP.DRUG_INTERACTION_AGENT
+  - path: ..\test_agent2.yaml
+    type: cortex_agent
+    targets:
+      default:
+        object: HEALTHCARE_DW.DDI_APP.DRUG_INTERACTION_AGENT
