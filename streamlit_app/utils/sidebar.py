@@ -52,18 +52,6 @@ def render_sidebar(session, show_language=False):
         )
 
     st.sidebar.markdown("---")
-
-    if role == "provider":
-        st.sidebar.markdown("""**Your Pages**
-- Provider Dashboard
-- Interaction Checker
-- Chat""")
-    elif role == "patient":
-        st.sidebar.markdown("""**Your Pages**
-- Patient Portal
-- Interaction Checker
-- Chat""")
-
     st.sidebar.markdown("**DataInTheD Hackathon 2026**")
 
     return lang
