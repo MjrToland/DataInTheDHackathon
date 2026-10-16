@@ -5,6 +5,21 @@ import streamlit as st
 from utils.sidebar import translate, LANG_NAMES
 
 
+def clean_response(text):
+    if not text:
+        return ""
+    # AI_COMPLETE often returns a JSON-encoded string with literal \n
+    s = str(text).strip()
+    if s.startswith('"') and s.endswith('"'):
+        try:
+            s = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            s = s[1:-1]
+    # Unescape any remaining literal backslash-n
+    s = s.replace("\\n", "\n").replace("\\t", "\t")
+    return s
+
+
 def call_agent_rest(prompt_text, session):
     try:
         conn = session.connection
@@ -21,8 +36,8 @@ def call_agent_rest(prompt_text, session):
             data = resp.json()
             for item in data.get("content", []):
                 if isinstance(item, dict) and item.get("type") == "text":
-                    return item.get("text", "")
-            return json.dumps(data, indent=2)
+                    return clean_response(item.get("text", ""))
+            return clean_response(json.dumps(data, indent=2))
     except Exception:
         pass
     return None
@@ -56,7 +71,7 @@ def call_search_fallback(prompt_text, session, role, lang):
             CHR(10), CHR(10), 'QUESTION: ', $${safe_p}$$
         ), OBJECT_CONSTRUCT('temperature', 0.3, 'max_tokens', 800)) AS RESPONSE"""
     ).collect()
-    return result[0]["RESPONSE"] if result else "No response received."
+    return clean_response(result[0]["RESPONSE"]) if result else "No response received."
 
 
 def render(session, lang):
