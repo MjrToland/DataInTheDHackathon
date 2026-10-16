@@ -5,9 +5,16 @@ Import and call render_sidebar(session) from every page.
 import streamlit as st
 
 LANG_NAMES = {
-    "en": "English", "es": "Spanish", "ar": "Arabic", "zh": "Chinese",
-    "fr": "French", "pt": "Portuguese", "de": "German", "ko": "Korean",
-    "vi": "Vietnamese", "ja": "Japanese"
+    "en": "English",
+    "es": "Español",
+    "ar": "العربية",
+    "zh": "中文",
+    "fr": "Français",
+    "pt": "Português",
+    "de": "Deutsch",
+    "ko": "한국어",
+    "vi": "Tiếng Việt",
+    "ja": "日本語"
 }
 
 
@@ -48,9 +55,16 @@ def render_sidebar(session, show_language=False):
     st.sidebar.markdown("---")
 
     if role == "provider":
-        st.sidebar.caption("Your pages: Provider Dashboard, Interaction Checker, Chat, Inbox Triage")
+        st.sidebar.markdown("""**Your Pages**
+- Provider Dashboard
+- Interaction Checker
+- Chat
+- Inbox Triage""")
     elif role == "patient":
-        st.sidebar.caption("Your pages: Patient Portal, Interaction Checker, Chat")
+        st.sidebar.markdown("""**Your Pages**
+- Patient Portal
+- Interaction Checker
+- Chat""")
 
     st.sidebar.markdown("**DataInTheD Hackathon 2026**")
 
