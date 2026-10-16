@@ -57,6 +57,13 @@ def render_sidebar(session, show_language=False):
     return lang
 
 
+def require_login():
+    if not st.session_state.get("role"):
+        st.title("Drug Interaction Intelligence")
+        st.error("Please sign in first. Click **app** in the sidebar to go to the login page.")
+        st.stop()
+
+
 def translate(text, lang, session):
     if not text or lang == "en":
         return text

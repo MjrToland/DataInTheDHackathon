@@ -5,17 +5,17 @@ Full-page translation when language is not English.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
-from utils.sidebar import render_sidebar, translate
+from utils.sidebar import render_sidebar, translate, require_login
 
 st.set_page_config(page_title="Patient Portal", page_icon="👤", layout="wide")
 session = get_active_session()
+lang = render_sidebar(session, show_language=True)
+require_login()
 
 role = st.session_state.get("role")
 pid = st.session_state.get("patient_id")
 patient_name = st.session_state.get("patient_name", "")
 default_lang = st.session_state.get("patient_lang", "en")
-
-lang = render_sidebar(session, show_language=True)
 
 # --- Patient resolution ---
 if role == "patient" and pid:

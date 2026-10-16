@@ -4,16 +4,13 @@ the patient's current medications or the full formulary.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
-from utils.sidebar import render_sidebar, translate
+from utils.sidebar import render_sidebar, translate, require_login
 
 st.set_page_config(page_title="Interaction Checker", page_icon="🔍", layout="wide")
 session = get_active_session()
 lang = render_sidebar(session, show_language=True)
-
+require_login()
 role = st.session_state.get("role")
-if not role:
-    st.warning("Please sign in from the home page.")
-    st.stop()
 
 st.title(translate("Drug Interaction Checker", lang, session))
 st.markdown(translate("Check if a medication you're considering interacts with current prescriptions or other drugs.", lang, session))

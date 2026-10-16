@@ -4,11 +4,12 @@ sorted by severity. Includes email alert sign-up.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
-from utils.sidebar import render_sidebar
+from utils.sidebar import render_sidebar, require_login
 
 st.set_page_config(page_title="Provider Dashboard", page_icon="🩺", layout="wide")
 session = get_active_session()
 render_sidebar(session)
+require_login()
 
 role = st.session_state.get("role")
 provider_id = st.session_state.get("provider_id")
