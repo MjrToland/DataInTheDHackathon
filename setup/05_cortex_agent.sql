@@ -1,50 +1,74 @@
 /*
  * 05_cortex_agent.sql
  * Cortex Agent for the drug interaction chat interface.
- * Wired to semantic views (Cortex Analyst) + Cortex Search services.
+ *
+ * NOTE: DATA_AGENT_RUN has a known issue with warehouse resolution.
+ * The chat page falls back to Cortex Search + AI_COMPLETE as a workaround.
  */
 
 USE DATABASE HEALTHCARE_DW;
-USE SCHEMA PHARMACY;
+USE SCHEMA DDI_APP;
 
-CREATE OR REPLACE CORTEX AGENT HEALTHCARE_DW.PHARMACY.DRUG_INTERACTION_AGENT
+CREATE OR REPLACE AGENT HEALTHCARE_DW.DDI_APP.DRUG_INTERACTION_AGENT
   COMMENT = 'AI agent for drug interaction detection, medication questions, and patient safety alerts'
-  AGENT_INSTRUCTIONS = '
-You are a clinical pharmacist AI assistant for a healthcare system. Your role is to help
-healthcare providers and patients understand drug interactions, medication safety, and
-treatment alternatives.
+  FROM SPECIFICATION
+  $$
+  models:
+    orchestration: auto
 
-CAPABILITIES:
-- Look up drug interaction alerts for specific patients
-- Search for known interactions between any two medications
-- Explain drug interactions in plain language
-- Suggest alternative medications that avoid dangerous interactions
-- Answer questions about prescriptions, dosages, and drug classes
-- Provide clinical encounter and diagnosis context for patients
+  orchestration:
+    tool_not_accessible: accept
+    budget:
+      seconds: 60
+      tokens: 32000
 
-GUIDELINES:
-- Always cite the severity level (CRITICAL, HIGH, MODERATE, LOW) when discussing interactions
-- For CRITICAL and HIGH severity interactions, emphasize urgency and recommend immediate provider consultation
-- When suggesting alternatives, explain why the alternative avoids the interaction
-- Use plain language when the user appears to be a patient; use clinical terminology for providers
-- Never recommend stopping a medication without provider consultation
-- If you cannot find specific interaction data, say so clearly rather than guessing
+  instructions:
+    response: |
+      You are a clinical pharmacist AI assistant. Help healthcare providers understand drug interactions,
+      medication safety, and treatment alternatives. Always cite severity levels. For CRITICAL/HIGH,
+      emphasize urgency. All interaction data is AI-generated and not clinically validated.
+      Prescription status FILLED = current/active.
 
-RESPONSE FORMAT:
-- Start with the most important safety information
-- Use bullet points for multiple interactions
-- Include the management recommendation for each interaction found
-'
-  EXTERNAL_ACCESS_INTEGRATIONS = ()
-  TOOLS = (
-    -- Cortex Analyst: natural-language SQL over patient medications
-    'HEALTHCARE_DW.PHARMACY.SV_PATIENT_MEDICATIONS'::SEMANTIC VIEW,
-    -- Cortex Analyst: natural-language SQL over interaction alerts
-    'HEALTHCARE_DW.PHARMACY.SV_DRUG_INTERACTION_ALERTS'::SEMANTIC VIEW,
-    -- Cortex Analyst: natural-language SQL over clinical encounters
-    'HEALTHCARE_DW.CLINICAL.SV_PATIENT_ENCOUNTERS'::SEMANTIC VIEW,
-    -- Cortex Search: semantic search over drug interactions
-    'HEALTHCARE_DW.PHARMACY.DRUG_INTERACTION_SEARCH'::CORTEX SEARCH,
-    -- Cortex Search: semantic search over pharmacist notes
-    'HEALTHCARE_DW.PHARMACY.PHARMACIST_NOTES_SEARCH'::CORTEX SEARCH
-  );
+    orchestration: |
+      For patient/medication/count questions use Analyst tools. For drug interaction mechanisms/effects use Search tools.
+
+    sample_questions:
+      - question: "What are the interactions for patient 53115?"
+      - question: "How many patients have critical interactions?"
+
+  tools:
+    - tool_spec:
+        type: "cortex_analyst_text_to_sql"
+        name: "PatientMedications"
+        description: "Query patient medication profiles, prescriptions, drug classes, costs, and prescriber details"
+    - tool_spec:
+        type: "cortex_analyst_text_to_sql"
+        name: "InteractionAlerts"
+        description: "Query drug interaction alerts including severity, affected patients, drug pairs, and management"
+    - tool_spec:
+        type: "cortex_analyst_text_to_sql"
+        name: "ClinicalEncounters"
+        description: "Query clinical encounters, diagnoses, conditions, and provider assignments"
+    - tool_spec:
+        type: "cortex_search"
+        name: "DrugInteractionSearch"
+        description: "Search drug interaction knowledge base for mechanisms, effects, and alternatives"
+    - tool_spec:
+        type: "cortex_search"
+        name: "PharmacistNotesSearch"
+        description: "Search pharmacist notes from prescriptions"
+
+  tool_resources:
+    PatientMedications:
+      semantic_view: "HEALTHCARE_DW.DDI_APP.SV_PATIENT_MEDICATIONS"
+    InteractionAlerts:
+      semantic_view: "HEALTHCARE_DW.DDI_APP.SV_DRUG_INTERACTION_ALERTS"
+    ClinicalEncounters:
+      semantic_view: "HEALTHCARE_DW.DDI_APP.SV_PATIENT_ENCOUNTERS"
+    DrugInteractionSearch:
+      search_service: "HEALTHCARE_DW.DDI_APP.DRUG_INTERACTION_SEARCH"
+      max_results: "5"
+    PharmacistNotesSearch:
+      search_service: "HEALTHCARE_DW.DDI_APP.PHARMACIST_NOTES_SEARCH"
+      max_results: "5"
+  $$;

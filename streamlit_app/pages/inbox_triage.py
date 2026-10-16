@@ -9,17 +9,21 @@ from snowflake.snowpark.context import get_active_session
 st.set_page_config(page_title="Inbox Triage", page_icon="📋", layout="wide")
 session = get_active_session()
 
+role = st.session_state.get("role")
+if role not in ("provider", "admin"):
+    st.warning("Please sign in as a provider or admin from the home page.")
+    st.stop()
+
 st.title("Inbox Triage")
 st.markdown("Auto-classified drug interaction alerts. Critical alerts generate email drafts automatically.")
+st.caption("Drug interaction data is AI-generated and not clinically validated.")
 
-# Tabs for different views
 tab_pending, tab_sent, tab_stats = st.tabs(["Pending Alerts", "Sent Alerts", "Statistics"])
 
 with tab_pending:
     st.subheader("Unresolved Alerts")
     st.markdown("Alerts not yet emailed to providers, sorted by severity.")
 
-    # Filter controls
     col1, col2 = st.columns(2)
     with col1:
         sev_filter = st.multiselect(
@@ -30,9 +34,11 @@ with tab_pending:
         limit = st.slider("Max alerts to show", 10, 200, 50)
 
     if sev_filter:
-        sev_list = ", ".join(f"'{s}'" for s in sev_filter)
-        pending = session.sql(f"""
-            SELECT
+        placeholders = ", ".join(["?"] * len(sev_filter))
+        params = sev_filter + [limit]
+
+        pending = session.sql(
+            f"""SELECT
                 a.PATIENT_ID,
                 a.FIRST_NAME || ' ' || a.LAST_NAME AS PATIENT,
                 a.SEVERITY,
@@ -43,10 +49,10 @@ with tab_pending:
                 a.PRESCRIBER_A_NAME AS PROVIDER_A,
                 a.PRESCRIBER_B_NAME AS PROVIDER_B,
                 a.INTERACTION_ID
-            FROM HEALTHCARE_DW.PHARMACY.PATIENT_DRUG_INTERACTION_ALERTS a
-            WHERE a.SEVERITY IN ({sev_list})
+            FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS a
+            WHERE a.SEVERITY IN ({placeholders})
               AND NOT EXISTS (
-                  SELECT 1 FROM HEALTHCARE_DW.PHARMACY.ALERT_EMAIL_LOG l
+                  SELECT 1 FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG l
                   WHERE l.PATIENT_ID = a.PATIENT_ID
                     AND l.INTERACTION_ID = a.INTERACTION_ID
               )
@@ -56,24 +62,23 @@ with tab_pending:
                     WHEN 'MODERATE' THEN 3 ELSE 4
                 END,
                 a.LAST_NAME
-            LIMIT {limit}
-        """).to_pandas()
+            LIMIT ?""",
+            params=params
+        ).to_pandas()
 
         if pending.empty:
             st.success("No pending alerts matching your filters.")
         else:
             st.markdown(f"**{len(pending)} pending alerts**")
 
-            # Batch action
-            if st.button("Generate Email Drafts for All CRITICAL Alerts", type="primary"):
+            if st.button("Generate Email Drafts for All Shown Alerts", type="primary"):
                 with st.spinner("Generating email drafts..."):
-                    session.sql("""
-                        CALL HEALTHCARE_DW.PHARMACY.GENERATE_INTERACTION_ALERTS()
-                    """).collect()
+                    session.sql(
+                        "CALL HEALTHCARE_DW.DDI_APP.GENERATE_INTERACTION_ALERTS()"
+                    ).collect()
                     st.success("Email drafts generated. Check the Sent Alerts tab.")
                     st.rerun()
 
-            # Display alerts
             for _, row in pending.iterrows():
                 sev = row["SEVERITY"]
                 icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MODERATE": "🟡", "LOW": "🟢"}.get(sev, "⚪")
@@ -92,26 +97,15 @@ with tab_sent:
             PROVIDER_NAME,
             EMAIL_SUBJECT,
             STATUS
-        FROM HEALTHCARE_DW.PHARMACY.ALERT_EMAIL_LOG
+        FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG
         ORDER BY SENT_AT DESC
         LIMIT 100
     """).to_pandas()
 
     if sent.empty:
-        st.info("No alerts have been sent yet.")
+        st.info("No alerts have been drafted yet.")
     else:
         st.dataframe(sent, use_container_width=True, hide_index=True)
-
-        # Expandable email preview
-        for _, row in sent.iterrows():
-            with st.expander(f"{row['SEVERITY']} — {row['EMAIL_SUBJECT'][:80]}..."):
-                full = session.sql(f"""
-                    SELECT EMAIL_BODY FROM HEALTHCARE_DW.PHARMACY.ALERT_EMAIL_LOG
-                    WHERE EMAIL_SUBJECT = $${row['EMAIL_SUBJECT']}$$
-                    LIMIT 1
-                """).to_pandas()
-                if not full.empty:
-                    st.text(full["EMAIL_BODY"].iloc[0])
 
 with tab_stats:
     st.subheader("Alert Statistics")
@@ -123,7 +117,7 @@ with tab_stats:
         by_sev = session.sql("""
             SELECT SEVERITY, COUNT(DISTINCT PATIENT_ID) AS PATIENTS,
                    COUNT(*) AS TOTAL_ALERTS
-            FROM HEALTHCARE_DW.PHARMACY.PATIENT_DRUG_INTERACTION_ALERTS
+            FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
             GROUP BY SEVERITY
             ORDER BY CASE SEVERITY
                 WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
@@ -139,7 +133,7 @@ with tab_stats:
                 DRUG_A_NAME || ' + ' || DRUG_B_NAME AS PAIR,
                 SEVERITY,
                 COUNT(DISTINCT PATIENT_ID) AS PATIENTS
-            FROM HEALTHCARE_DW.PHARMACY.PATIENT_DRUG_INTERACTION_ALERTS
+            FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
             GROUP BY DRUG_A_NAME, DRUG_B_NAME, SEVERITY
             ORDER BY PATIENTS DESC
             LIMIT 10
@@ -148,12 +142,28 @@ with tab_stats:
             st.dataframe(top_pairs, use_container_width=True, hide_index=True)
 
     st.markdown("---")
+
+    # Email subscription stats
+    st.markdown("**Provider Email Subscriptions**")
+    sub_stats = session.sql("""
+        SELECT
+            COUNT(*) AS TOTAL_SUBSCRIBED,
+            COUNT_IF(SUBSCRIBED = TRUE) AS ACTIVE,
+            COUNT_IF(SUBSCRIBED = FALSE) AS PAUSED
+        FROM HEALTHCARE_DW.DDI_APP.PROVIDER_EMAIL_SUBSCRIPTIONS
+    """).to_pandas()
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("Total Signed Up", int(sub_stats["TOTAL_SUBSCRIBED"].iloc[0]))
+    sc2.metric("Active", int(sub_stats["ACTIVE"].iloc[0]))
+    sc3.metric("Paused", int(sub_stats["PAUSED"].iloc[0]))
+
+    st.markdown("---")
     st.markdown("**Polypharmacy Distribution**")
     poly = session.sql("""
         WITH rx_counts AS (
             SELECT PATIENT_ID, COUNT(DISTINCT MEDICATION_ID) AS NUM_MEDS
             FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS
-            WHERE STATUS IN ('ACTIVE', 'FILLED')
+            WHERE STATUS = 'FILLED'
             GROUP BY PATIENT_ID
         )
         SELECT NUM_MEDS AS MEDICATIONS, COUNT(*) AS PATIENTS

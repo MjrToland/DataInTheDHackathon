@@ -1,163 +1,150 @@
 /*
  * 02_data_enrichment.sql
- * Build the drug interaction reference table.
+ * Build the drug interaction reference table and patient preferences.
+ * All new objects created in HEALTHCARE_DW.DDI_APP (source tables untouched).
  *
- * Strategy:
- *   1. If DrugBank Marketplace data is available, join it to our 20 medications
- *   2. Fallback: use Cortex AI_COMPLETE to generate interaction data for all
- *      medication pairs from our formulary
- *   3. Enrich all interactions with plain-language patient-friendly summaries
- *
- * Pipeline: MEDICATIONS (20 drugs) -> cross-join pairs -> AI interaction check
- *           -> severity rating -> patient-friendly summary -> alternatives
+ * Model: claude-sonnet-4-6 (GA)
+ * Prescription status: FILLED = currently taking
  */
 
 USE DATABASE HEALTHCARE_DW;
-USE SCHEMA PHARMACY;
+USE SCHEMA DDI_APP;
+USE WAREHOUSE DEFAULT_WH;
 
--- Add preferred_language to patients for AI_TRANSLATE support
-ALTER TABLE HEALTHCARE_DW.CORE.PATIENTS
-  ADD COLUMN IF NOT EXISTS PREFERRED_LANGUAGE VARCHAR(10) DEFAULT 'en';
+-- Patient language preferences (separate from source CORE.PATIENTS)
+CREATE OR REPLACE TABLE HEALTHCARE_DW.DDI_APP.PATIENT_PREFERENCES (
+    PATIENT_ID           NUMBER NOT NULL,
+    PREFERRED_LANGUAGE   VARCHAR(10) DEFAULT 'en',
+    CREATED_AT           TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (PATIENT_ID)
+);
 
--- Assign languages to simulate a multilingual patient population
-UPDATE HEALTHCARE_DW.CORE.PATIENTS
-SET PREFERRED_LANGUAGE = CASE
-    WHEN PATIENT_ID % 10 = 0 THEN 'es'   -- Spanish
-    WHEN PATIENT_ID % 10 = 1 THEN 'ar'    -- Arabic
-    WHEN PATIENT_ID % 10 = 2 THEN 'zh'    -- Chinese
-    WHEN PATIENT_ID % 10 = 3 THEN 'fr'    -- French
-    WHEN PATIENT_ID % 10 = 4 THEN 'pt'    -- Portuguese
-    WHEN PATIENT_ID % 10 = 5 THEN 'de'    -- German
-    WHEN PATIENT_ID % 10 = 6 THEN 'ko'    -- Korean
-    WHEN PATIENT_ID % 10 = 7 THEN 'vi'    -- Vietnamese
-    WHEN PATIENT_ID % 10 = 8 THEN 'ja'    -- Japanese
-    ELSE 'en'                              -- English
-END;
+INSERT INTO HEALTHCARE_DW.DDI_APP.PATIENT_PREFERENCES (PATIENT_ID, PREFERRED_LANGUAGE)
+SELECT PATIENT_ID,
+    CASE
+        WHEN PATIENT_ID % 10 = 0 THEN 'es'
+        WHEN PATIENT_ID % 10 = 1 THEN 'ar'
+        WHEN PATIENT_ID % 10 = 2 THEN 'zh'
+        WHEN PATIENT_ID % 10 = 3 THEN 'fr'
+        WHEN PATIENT_ID % 10 = 4 THEN 'pt'
+        WHEN PATIENT_ID % 10 = 5 THEN 'de'
+        WHEN PATIENT_ID % 10 = 6 THEN 'ko'
+        WHEN PATIENT_ID % 10 = 7 THEN 'vi'
+        WHEN PATIENT_ID % 10 = 8 THEN 'ja'
+        ELSE 'en'
+    END
+FROM HEALTHCARE_DW.CORE.PATIENTS;
 
--- Create the drug interaction reference table
-CREATE OR REPLACE TABLE HEALTHCARE_DW.PHARMACY.DRUG_INTERACTIONS (
+-- Synthetic provider emails
+CREATE OR REPLACE TABLE HEALTHCARE_DW.DDI_APP.PROVIDER_CONTACTS AS
+SELECT
+    PROVIDER_ID, FIRST_NAME, LAST_NAME, SPECIALTY,
+    LOWER(FIRST_NAME || '.' || LAST_NAME || '@metro-health.demo') AS EMAIL
+FROM HEALTHCARE_DW.CORE.PROVIDERS;
+
+-- Drug interaction reference table
+CREATE OR REPLACE TABLE HEALTHCARE_DW.DDI_APP.DRUG_INTERACTIONS (
     INTERACTION_ID       NUMBER AUTOINCREMENT,
     DRUG_A_ID            NUMBER NOT NULL,
     DRUG_A_NAME          VARCHAR NOT NULL,
     DRUG_B_ID            NUMBER NOT NULL,
     DRUG_B_NAME          VARCHAR NOT NULL,
-    SEVERITY             VARCHAR NOT NULL,       -- CRITICAL, HIGH, MODERATE, LOW
-    INTERACTION_TYPE     VARCHAR,                 -- PHARMACOKINETIC, PHARMACODYNAMIC, etc.
-    MECHANISM            VARCHAR,                 -- How the interaction works
-    CLINICAL_EFFECT      VARCHAR,                 -- What happens clinically
-    MANAGEMENT           VARCHAR,                 -- How to manage it
-    PATIENT_SUMMARY      VARCHAR,                 -- Plain-language explanation
-    ALTERNATIVE_FOR_A    VARCHAR,                 -- Alternative drug suggestion for A
-    ALTERNATIVE_FOR_B    VARCHAR,                 -- Alternative drug suggestion for B
+    SEVERITY             VARCHAR NOT NULL,
+    INTERACTION_TYPE     VARCHAR,
+    MECHANISM            VARCHAR,
+    CLINICAL_EFFECT      VARCHAR,
+    MANAGEMENT           VARCHAR,
+    PATIENT_SUMMARY      VARCHAR,
+    ALTERNATIVE_FOR_A    VARCHAR,
+    ALTERNATIVE_FOR_B    VARCHAR,
     SOURCE               VARCHAR DEFAULT 'AI_GENERATED',
     CREATED_AT           TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
--- Generate all unique medication pairs from our formulary
-CREATE OR REPLACE TEMPORARY TABLE MEDICATION_PAIRS AS
-SELECT
-    a.MEDICATION_ID AS DRUG_A_ID,
-    a.GENERIC_NAME  AS DRUG_A_NAME,
-    a.DRUG_CLASS    AS DRUG_A_CLASS,
-    b.MEDICATION_ID AS DRUG_B_ID,
-    b.GENERIC_NAME  AS DRUG_B_NAME,
-    b.DRUG_CLASS    AS DRUG_B_CLASS
-FROM HEALTHCARE_DW.PHARMACY.MEDICATIONS a
-JOIN HEALTHCARE_DW.PHARMACY.MEDICATIONS b
-  ON a.MEDICATION_ID < b.MEDICATION_ID;
-
--- Use AI_COMPLETE to assess each drug pair for interactions
--- This generates clinically-grounded interaction data for our 190 unique pairs
-INSERT INTO HEALTHCARE_DW.PHARMACY.DRUG_INTERACTIONS
+-- Generate interactions via AI_COMPLETE for all 190 drug pairs
+INSERT INTO HEALTHCARE_DW.DDI_APP.DRUG_INTERACTIONS
     (DRUG_A_ID, DRUG_A_NAME, DRUG_B_ID, DRUG_B_NAME,
      SEVERITY, INTERACTION_TYPE, MECHANISM, CLINICAL_EFFECT,
      MANAGEMENT, PATIENT_SUMMARY, ALTERNATIVE_FOR_A, ALTERNATIVE_FOR_B, SOURCE)
-SELECT
-    mp.DRUG_A_ID,
-    mp.DRUG_A_NAME,
-    mp.DRUG_B_ID,
-    mp.DRUG_B_NAME,
-    TRIM(ai.response:severity::VARCHAR)          AS SEVERITY,
-    TRIM(ai.response:interaction_type::VARCHAR)  AS INTERACTION_TYPE,
-    TRIM(ai.response:mechanism::VARCHAR)         AS MECHANISM,
-    TRIM(ai.response:clinical_effect::VARCHAR)   AS CLINICAL_EFFECT,
-    TRIM(ai.response:management::VARCHAR)        AS MANAGEMENT,
-    TRIM(ai.response:patient_summary::VARCHAR)   AS PATIENT_SUMMARY,
-    TRIM(ai.response:alternative_for_a::VARCHAR) AS ALTERNATIVE_FOR_A,
-    TRIM(ai.response:alternative_for_b::VARCHAR) AS ALTERNATIVE_FOR_B,
+WITH medication_pairs AS (
+    SELECT
+        a.MEDICATION_ID AS DRUG_A_ID, a.GENERIC_NAME AS DRUG_A_NAME, a.DRUG_CLASS AS DRUG_A_CLASS,
+        b.MEDICATION_ID AS DRUG_B_ID, b.GENERIC_NAME AS DRUG_B_NAME, b.DRUG_CLASS AS DRUG_B_CLASS
+    FROM HEALTHCARE_DW.PHARMACY.MEDICATIONS a
+    JOIN HEALTHCARE_DW.PHARMACY.MEDICATIONS b ON a.MEDICATION_ID < b.MEDICATION_ID
+),
+ai_results AS (
+    SELECT mp.*,
+        TRY_PARSE_JSON(TRIM(REPLACE(REPLACE(
+            AI_COMPLETE('claude-sonnet-4-6',
+                CONCAT('Drug interaction: ', mp.DRUG_A_NAME, ' (', mp.DRUG_A_CLASS, ') + ',
+                    mp.DRUG_B_NAME, ' (', mp.DRUG_B_CLASS, '). ',
+                    'Return ONLY a JSON object (no markdown). Keep ALL values under 30 words. ',
+                    'Keys: severity(CRITICAL/HIGH/MODERATE/LOW/NONE), interaction_type(PHARMACOKINETIC/PHARMACODYNAMIC/ADDITIVE/SYNERGISTIC/ANTAGONISTIC/NONE), ',
+                    'mechanism, clinical_effect, management, patient_summary, alternative_for_a, alternative_for_b.'),
+                OBJECT_CONSTRUCT('temperature', 0.1, 'max_tokens', 500)
+            ), '```json', ''), '```', ''
+        ))) AS response
+    FROM medication_pairs mp
+)
+SELECT DRUG_A_ID, DRUG_A_NAME, DRUG_B_ID, DRUG_B_NAME,
+    UPPER(TRIM(response:severity::VARCHAR)),
+    TRIM(response:interaction_type::VARCHAR),
+    TRIM(response:mechanism::VARCHAR),
+    TRIM(response:clinical_effect::VARCHAR),
+    TRIM(response:management::VARCHAR),
+    TRIM(response:patient_summary::VARCHAR),
+    TRIM(response:alternative_for_a::VARCHAR),
+    TRIM(response:alternative_for_b::VARCHAR),
     'AI_GENERATED'
-FROM MEDICATION_PAIRS mp,
-LATERAL (
-    SELECT PARSE_JSON(SNOWFLAKE.CORTEX.COMPLETE(
-        'claude-3-5-sonnet',
-        CONCAT(
-            'You are a clinical pharmacist. Analyze the interaction between these two drugs. ',
-            'Drug A: ', mp.DRUG_A_NAME, ' (', mp.DRUG_A_CLASS, '). ',
-            'Drug B: ', mp.DRUG_B_NAME, ' (', mp.DRUG_B_CLASS, '). ',
-            'Return a JSON object with these exact keys: ',
-            'severity (one of: CRITICAL, HIGH, MODERATE, LOW, NONE), ',
-            'interaction_type (PHARMACOKINETIC, PHARMACODYNAMIC, ADDITIVE, SYNERGISTIC, ANTAGONISTIC, or NONE), ',
-            'mechanism (brief mechanism of interaction or "No known interaction"), ',
-            'clinical_effect (what happens to the patient), ',
-            'management (clinical recommendation), ',
-            'patient_summary (2-3 sentence plain language explanation for a patient), ',
-            'alternative_for_a (name one alternative drug for Drug A that avoids this interaction, or "N/A"), ',
-            'alternative_for_b (name one alternative drug for Drug B that avoids this interaction, or "N/A"). ',
-            'Respond ONLY with the JSON object, no other text.'
-        )
-    )) AS response
-) ai
-WHERE ai.response:severity::VARCHAR != 'NONE';
+FROM ai_results
+WHERE response IS NOT NULL AND UPPER(TRIM(response:severity::VARCHAR)) != 'NONE';
 
--- Create the polypharmacy risk view: patients with flagged interactions
-CREATE OR REPLACE VIEW HEALTHCARE_DW.PHARMACY.PATIENT_DRUG_INTERACTION_ALERTS AS
+-- Alert email log
+CREATE OR REPLACE TABLE HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG (
+    LOG_ID               NUMBER AUTOINCREMENT,
+    PATIENT_ID           NUMBER,
+    INTERACTION_ID       NUMBER,
+    PROVIDER_ID          NUMBER,
+    PROVIDER_NAME        VARCHAR,
+    SEVERITY             VARCHAR,
+    EMAIL_SUBJECT        VARCHAR,
+    EMAIL_BODY           VARCHAR,
+    SENT_AT              TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    STATUS               VARCHAR DEFAULT 'DRAFTED'
+);
+
+-- Patient drug interaction alerts view (uses FILLED status only)
+CREATE OR REPLACE VIEW HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS AS
 WITH active_rx AS (
     SELECT PATIENT_ID, MEDICATION_ID, MEDICATION_NAME, PROVIDER_ID, PRESCRIBED_DATE
     FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS
-    WHERE STATUS IN ('ACTIVE', 'FILLED')
-    QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY PATIENT_ID, MEDICATION_ID
-        ORDER BY PRESCRIBED_DATE DESC
-    ) = 1
+    WHERE STATUS = 'FILLED'
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY PATIENT_ID, MEDICATION_ID ORDER BY PRESCRIBED_DATE DESC) = 1
 ),
 flagged AS (
     SELECT
-        rx_a.PATIENT_ID,
-        di.INTERACTION_ID,
-        di.DRUG_A_NAME,
-        di.DRUG_B_NAME,
-        di.SEVERITY,
-        di.INTERACTION_TYPE,
-        di.MECHANISM,
-        di.CLINICAL_EFFECT,
-        di.MANAGEMENT,
-        di.PATIENT_SUMMARY,
-        di.ALTERNATIVE_FOR_A,
-        di.ALTERNATIVE_FOR_B,
-        rx_a.PROVIDER_ID AS PRESCRIBER_A_ID,
-        rx_b.PROVIDER_ID AS PRESCRIBER_B_ID,
-        rx_a.PRESCRIBED_DATE AS RX_A_DATE,
-        rx_b.PRESCRIBED_DATE AS RX_B_DATE
+        rx_a.PATIENT_ID, di.INTERACTION_ID,
+        di.DRUG_A_NAME, di.DRUG_B_NAME, di.SEVERITY, di.INTERACTION_TYPE,
+        di.MECHANISM, di.CLINICAL_EFFECT, di.MANAGEMENT, di.PATIENT_SUMMARY,
+        di.ALTERNATIVE_FOR_A, di.ALTERNATIVE_FOR_B,
+        rx_a.PROVIDER_ID AS PRESCRIBER_A_ID, rx_b.PROVIDER_ID AS PRESCRIBER_B_ID,
+        rx_a.PRESCRIBED_DATE AS RX_A_DATE, rx_b.PRESCRIBED_DATE AS RX_B_DATE
     FROM active_rx rx_a
-    JOIN active_rx rx_b
-      ON rx_a.PATIENT_ID = rx_b.PATIENT_ID
-     AND rx_a.MEDICATION_ID < rx_b.MEDICATION_ID
-    JOIN HEALTHCARE_DW.PHARMACY.DRUG_INTERACTIONS di
+    JOIN active_rx rx_b ON rx_a.PATIENT_ID = rx_b.PATIENT_ID AND rx_a.MEDICATION_ID < rx_b.MEDICATION_ID
+    JOIN HEALTHCARE_DW.DDI_APP.DRUG_INTERACTIONS di
       ON (di.DRUG_A_ID = rx_a.MEDICATION_ID AND di.DRUG_B_ID = rx_b.MEDICATION_ID)
       OR (di.DRUG_A_ID = rx_b.MEDICATION_ID AND di.DRUG_B_ID = rx_a.MEDICATION_ID)
 )
-SELECT
-    f.*,
-    p.FIRST_NAME,
-    p.LAST_NAME,
-    p.DATE_OF_BIRTH,
-    p.PREFERRED_LANGUAGE,
-    p.HAS_CHRONIC_CONDITION,
+SELECT f.*,
+    p.FIRST_NAME, p.LAST_NAME, p.DATE_OF_BIRTH,
+    pp.PREFERRED_LANGUAGE, p.HAS_CHRONIC_CONDITION,
     prov_a.FIRST_NAME || ' ' || prov_a.LAST_NAME AS PRESCRIBER_A_NAME,
     prov_a.SPECIALTY AS PRESCRIBER_A_SPECIALTY,
     prov_b.FIRST_NAME || ' ' || prov_b.LAST_NAME AS PRESCRIBER_B_NAME,
     prov_b.SPECIALTY AS PRESCRIBER_B_SPECIALTY
 FROM flagged f
 JOIN HEALTHCARE_DW.CORE.PATIENTS p ON f.PATIENT_ID = p.PATIENT_ID
+LEFT JOIN HEALTHCARE_DW.DDI_APP.PATIENT_PREFERENCES pp ON f.PATIENT_ID = pp.PATIENT_ID
 LEFT JOIN HEALTHCARE_DW.CORE.PROVIDERS prov_a ON f.PRESCRIBER_A_ID = prov_a.PROVIDER_ID
 LEFT JOIN HEALTHCARE_DW.CORE.PROVIDERS prov_b ON f.PRESCRIBER_B_ID = prov_b.PROVIDER_ID;
