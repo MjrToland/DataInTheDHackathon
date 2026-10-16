@@ -12,11 +12,8 @@ session = get_active_session()
 render_sidebar(session)
 
 role = st.session_state.get("role")
-if role not in ("provider", "admin"):
-    if role == "patient":
-        st.error("This page is for providers. Please use the Patient Portal or Interaction Checker.")
-    else:
-        st.warning("Please sign in as a provider or admin from the home page.")
+if role != "admin":
+    st.warning("This page is only available in Admin mode.")
     st.stop()
 
 st.title("Inbox Triage")

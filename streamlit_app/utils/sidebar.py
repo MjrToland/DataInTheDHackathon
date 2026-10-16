@@ -57,8 +57,7 @@ def render_sidebar(session, show_language=False):
         st.sidebar.markdown("""**Your Pages**
 - Provider Dashboard
 - Interaction Checker
-- Chat
-- Inbox Triage""")
+- Chat""")
     elif role == "patient":
         st.sidebar.markdown("""**Your Pages**
 - Patient Portal
