@@ -1,10 +1,11 @@
 """
 Drug Interaction Intelligence Platform
-Landing page with role selection: Provider, Patient, or Admin (demo) mode.
+Single-page app with role-based navigation. No pages/ directory --
+the sidebar radio only shows pages the logged-in role can access.
 """
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
-from utils.sidebar import render_sidebar
+from utils.sidebar import render_sidebar, LANG_NAMES
 
 st.set_page_config(
     page_title="Drug Interaction Intelligence",
@@ -14,9 +15,65 @@ st.set_page_config(
 )
 
 session = get_active_session()
-lang = render_sidebar(session)
+
+# Role-based page map
+PROVIDER_PAGES = ["Home", "Provider Dashboard", "Interaction Checker", "Chat"]
+PATIENT_PAGES = ["Home", "Patient Portal", "Interaction Checker", "Chat"]
+ADMIN_PAGES = ["Home", "Provider Dashboard", "Patient Portal", "Interaction Checker", "Chat"]
 
 
+def logout():
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
+
+def show_sidebar_nav():
+    role = st.session_state.get("role")
+    st.sidebar.title("Drug Interaction Intelligence")
+    st.sidebar.markdown("---")
+
+    if role == "provider":
+        st.sidebar.markdown(f"**Provider**")
+        st.sidebar.markdown(st.session_state.get("provider_name", ""))
+    elif role == "patient":
+        st.sidebar.markdown(f"**Patient**")
+        st.sidebar.markdown(st.session_state.get("patient_name", ""))
+    elif role == "admin":
+        st.sidebar.markdown("**Admin / Demo Mode**")
+
+    # Navigation radio -- only show pages for this role
+    page_list = {"provider": PROVIDER_PAGES, "patient": PATIENT_PAGES, "admin": ADMIN_PAGES}.get(role, [])
+    selected_page = None
+    if page_list:
+        selected_page = st.sidebar.radio("Navigate", page_list, key="nav_radio")
+
+    if role:
+        if st.sidebar.button("Log out"):
+            logout()
+            st.experimental_rerun()
+
+    # Language selector
+    lang = "en"
+    if role in ("patient", "provider", "admin"):
+        st.sidebar.markdown("---")
+        default_lang = st.session_state.get("patient_lang", "en") if role == "patient" else "en"
+        default_idx = list(LANG_NAMES.keys()).index(default_lang) if default_lang in LANG_NAMES else 0
+        lang = st.sidebar.selectbox(
+            "Language", list(LANG_NAMES.keys()),
+            format_func=lambda x: LANG_NAMES[x],
+            index=default_idx,
+            key="sidebar_lang"
+        )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**DataInTheD Hackathon 2026**")
+
+    return selected_page, lang
+
+
+# ============================================================
+# Login page
+# ============================================================
 def show_login():
     st.title("Drug Interaction Intelligence Platform")
     st.markdown("AI-powered drug interaction detection and alerting for healthcare.")
@@ -25,25 +82,16 @@ def show_login():
 
     col_prov, col_pat, col_admin = st.columns(3)
 
-    # --- Provider login ---
     with col_prov:
         st.subheader("I'm a Provider")
         st.markdown("View your patient panel, flagged interactions, and sign up for email alerts.")
-
         providers = session.sql("""
-            SELECT PROVIDER_ID,
-                   FIRST_NAME || ' ' || LAST_NAME AS NAME,
-                   SPECIALTY, CREDENTIAL
-            FROM HEALTHCARE_DW.CORE.PROVIDERS
-            WHERE STATUS = 'ACTIVE'
-            ORDER BY LAST_NAME
+            SELECT PROVIDER_ID, FIRST_NAME || ' ' || LAST_NAME AS NAME, SPECIALTY
+            FROM HEALTHCARE_DW.CORE.PROVIDERS WHERE STATUS = 'ACTIVE' ORDER BY LAST_NAME
         """).to_pandas()
-
         display_list = (providers["NAME"] + " (" + providers["SPECIALTY"] + ")").tolist()
         selected_idx = st.selectbox("Find your name", range(len(display_list)),
-                                    format_func=lambda i: display_list[i],
-                                    key="prov_select")
-
+                                    format_func=lambda i: display_list[i], key="prov_select")
         if st.button("Sign in as Provider", type="primary", key="btn_prov"):
             row = providers.iloc[selected_idx]
             st.session_state["role"] = "provider"
@@ -51,17 +99,13 @@ def show_login():
             st.session_state["provider_name"] = row["NAME"]
             st.experimental_rerun()
 
-    # --- Patient login ---
     with col_pat:
         st.subheader("I'm a Patient")
         st.markdown("View your medications and safety information in your language.")
-
         if "suggested_patient" not in st.session_state:
             suggested = session.sql("""
-                SELECT p.FIRST_NAME, p.LAST_NAME, p.DATE_OF_BIRTH
-                FROM HEALTHCARE_DW.CORE.PATIENTS p
-                ORDER BY RANDOM()
-                LIMIT 1
+                SELECT FIRST_NAME, LAST_NAME, DATE_OF_BIRTH
+                FROM HEALTHCARE_DW.CORE.PATIENTS ORDER BY RANDOM() LIMIT 1
             """).to_pandas()
             if not suggested.empty:
                 st.session_state["suggested_patient"] = {
@@ -69,27 +113,21 @@ def show_login():
                     "dob": str(suggested.iloc[0]["DATE_OF_BIRTH"]),
                     "first_name": suggested.iloc[0]["FIRST_NAME"],
                 }
-
         hint = st.session_state.get("suggested_patient", {})
         if hint:
             st.info(f"Try: **{hint.get('first_name', '')} {hint.get('last_name', '')}**, DOB **{hint.get('dob', '')}**")
-
         last_name = st.text_input("Last Name", value=hint.get("last_name", ""), key="pat_last")
         dob = st.date_input("Date of Birth", value=None, key="pat_dob")
-
         if st.button("Sign in as Patient", type="primary", key="btn_pat"):
             if last_name and dob:
                 patients = session.sql(
                     """SELECT p.PATIENT_ID, p.FIRST_NAME, p.LAST_NAME,
                               COALESCE(pp.PREFERRED_LANGUAGE, 'en') AS PREFERRED_LANGUAGE
                        FROM HEALTHCARE_DW.CORE.PATIENTS p
-                       LEFT JOIN HEALTHCARE_DW.DDI_APP.PATIENT_PREFERENCES pp
-                         ON p.PATIENT_ID = pp.PATIENT_ID
-                       WHERE UPPER(p.LAST_NAME) = UPPER(?)
-                         AND p.DATE_OF_BIRTH = ?""",
+                       LEFT JOIN HEALTHCARE_DW.DDI_APP.PATIENT_PREFERENCES pp ON p.PATIENT_ID = pp.PATIENT_ID
+                       WHERE UPPER(p.LAST_NAME) = UPPER(?) AND p.DATE_OF_BIRTH = ?""",
                     params=[last_name, str(dob)]
                 ).to_pandas()
-
                 if patients.empty:
                     st.error("No patient found with that name and date of birth.")
                 else:
@@ -102,186 +140,83 @@ def show_login():
             else:
                 st.warning("Enter both last name and date of birth.")
 
-    # --- Admin / demo mode ---
     with col_admin:
         st.subheader("Demo / Admin")
-        st.markdown("Full access to all pages and features. For judges and demos.")
-
+        st.markdown("Full access to all pages and features.")
         if st.button("Enter Admin Mode", key="btn_admin"):
             st.session_state["role"] = "admin"
             st.experimental_rerun()
 
 
-def show_dashboard():
+# ============================================================
+# Home dashboard (personalized by role)
+# ============================================================
+def show_home(lang):
     role = st.session_state.get("role")
     st.title("Drug Interaction Intelligence Platform")
     st.caption("Drug interaction data is AI-generated and not clinically validated.")
 
     if role == "patient":
-        show_patient_dashboard()
+        pid = st.session_state.get("patient_id")
+        st.markdown(f"### {st.session_state.get('patient_name', '')}")
+        col1, col2 = st.columns(2)
+        with col1:
+            r = session.sql("SELECT COUNT(DISTINCT MEDICATION_ID) FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS WHERE PATIENT_ID = ? AND STATUS = 'FILLED'", params=[pid]).collect()
+            st.metric("Your Medications", f"{r[0][0]:,}")
+        with col2:
+            r = session.sql("SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS WHERE PATIENT_ID = ? AND SEVERITY IN ('CRITICAL','HIGH')", params=[pid]).collect()
+            st.metric("Interactions to Review", f"{r[0][0]:,}")
     elif role == "provider":
-        show_provider_dashboard()
+        provider_id = st.session_state.get("provider_id")
+        st.markdown(f"### {st.session_state.get('provider_name', '')}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            r = session.sql("SELECT COUNT(DISTINCT PATIENT_ID) FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS WHERE PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?", params=[provider_id, provider_id]).collect()
+            st.metric("Your Patients at Risk", f"{r[0][0]:,}")
+        with col2:
+            r = session.sql("SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS WHERE (PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?) AND SEVERITY IN ('CRITICAL','HIGH')", params=[provider_id, provider_id]).collect()
+            st.metric("Critical/High Alerts", f"{r[0][0]:,}")
+        with col3:
+            r = session.sql("SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG WHERE PROVIDER_ID = ?", params=[provider_id]).collect()
+            st.metric("Alerts Drafted", f"{r[0][0]:,}")
     else:
-        show_admin_dashboard()
+        # Admin global stats
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            r = session.sql("SELECT COUNT(DISTINCT PATIENT_ID) FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS WHERE STATUS = 'FILLED'").collect()
+            st.metric("Patients on Meds", f"{r[0][0]:,}")
+        with col2:
+            r = session.sql("SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.DRUG_INTERACTIONS WHERE SEVERITY IN ('CRITICAL','HIGH')").collect()
+            st.metric("High-Risk Interactions", f"{r[0][0]:,}")
+        with col3:
+            r = session.sql("SELECT COUNT(DISTINCT PATIENT_ID) FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS WHERE SEVERITY IN ('CRITICAL','HIGH')").collect()
+            st.metric("Patients at Risk", f"{r[0][0]:,}")
+        with col4:
+            r = session.sql("SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG").collect()
+            st.metric("Alerts Drafted", f"{r[0][0]:,}")
 
 
-def show_patient_dashboard():
-    pid = st.session_state.get("patient_id")
-    name = st.session_state.get("patient_name", "")
-    st.markdown(f"### {name}")
+# ============================================================
+# Main routing
+# ============================================================
+role = st.session_state.get("role")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        result = session.sql(
-            """SELECT COUNT(DISTINCT MEDICATION_ID)
-               FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS
-               WHERE PATIENT_ID = ? AND STATUS = 'FILLED'""",
-            params=[pid]
-        ).collect()
-        st.metric("Your Medications", f"{result[0][0]:,}")
-    with col2:
-        result = session.sql(
-            """SELECT COUNT(*)
-               FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-               WHERE PATIENT_ID = ? AND SEVERITY IN ('CRITICAL', 'HIGH')""",
-            params=[pid]
-        ).collect()
-        st.metric("Interactions to Review", f"{result[0][0]:,}")
-
-    st.markdown("---")
-    st.subheader("Your Drug Interaction Alerts")
-    alerts = session.sql(
-        """SELECT DRUG_A_NAME, DRUG_B_NAME, SEVERITY, PATIENT_SUMMARY
-           FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-           WHERE PATIENT_ID = ?
-           ORDER BY CASE SEVERITY WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
-                    WHEN 'MODERATE' THEN 3 ELSE 4 END""",
-        params=[pid]
-    ).to_pandas()
-
-    if alerts.empty:
-        st.success("No drug interaction alerts for your current medications.")
-    else:
-        for _, a in alerts.iterrows():
-            icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MODERATE": "🟡", "LOW": "🟢"}.get(a["SEVERITY"], "⚪")
-            with st.expander(f"{icon} {a['SEVERITY']}: {a['DRUG_A_NAME']} + {a['DRUG_B_NAME']}"):
-                st.markdown(a["PATIENT_SUMMARY"] or "")
-
-
-def show_provider_dashboard():
-    provider_id = st.session_state.get("provider_id")
-    name = st.session_state.get("provider_name", "")
-    st.markdown(f"### {name}")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        result = session.sql(
-            """SELECT COUNT(DISTINCT PATIENT_ID)
-               FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-               WHERE PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?""",
-            params=[provider_id, provider_id]
-        ).collect()
-        st.metric("Your Patients at Risk", f"{result[0][0]:,}")
-    with col2:
-        result = session.sql(
-            """SELECT COUNT(*)
-               FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-               WHERE (PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?)
-                 AND SEVERITY IN ('CRITICAL', 'HIGH')""",
-            params=[provider_id, provider_id]
-        ).collect()
-        st.metric("Critical/High Alerts", f"{result[0][0]:,}")
-    with col3:
-        result = session.sql(
-            """SELECT COUNT(*)
-               FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG
-               WHERE PROVIDER_ID = ?""",
-            params=[provider_id]
-        ).collect()
-        st.metric("Alerts Drafted", f"{result[0][0]:,}")
-
-    st.markdown("---")
-    st.subheader("Top Interactions in Your Panel")
-    top = session.sql(
-        """SELECT
-            DRUG_A_NAME || ' + ' || DRUG_B_NAME AS DRUG_PAIR,
-            SEVERITY,
-            COUNT(DISTINCT PATIENT_ID) AS AFFECTED_PATIENTS
-        FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-        WHERE (PRESCRIBER_A_ID = ? OR PRESCRIBER_B_ID = ?)
-          AND SEVERITY IN ('CRITICAL', 'HIGH')
-        GROUP BY DRUG_A_NAME, DRUG_B_NAME, SEVERITY
-        ORDER BY AFFECTED_PATIENTS DESC
-        LIMIT 10""",
-        params=[provider_id, provider_id]
-    ).to_pandas()
-
-    if top.empty:
-        st.success("No critical or high-severity interactions in your patient panel.")
-    else:
-        st.dataframe(top, use_container_width=True)
-
-
-def show_admin_dashboard():
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        result = session.sql("""
-            SELECT COUNT(DISTINCT PATIENT_ID)
-            FROM HEALTHCARE_DW.PHARMACY.PRESCRIPTIONS WHERE STATUS = 'FILLED'
-        """).collect()
-        st.metric("Patients on Meds", f"{result[0][0]:,}")
-    with col2:
-        result = session.sql("""
-            SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.DRUG_INTERACTIONS
-            WHERE SEVERITY IN ('CRITICAL', 'HIGH')
-        """).collect()
-        st.metric("High-Risk Interactions", f"{result[0][0]:,}")
-    with col3:
-        result = session.sql("""
-            SELECT COUNT(DISTINCT PATIENT_ID)
-            FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-            WHERE SEVERITY IN ('CRITICAL', 'HIGH')
-        """).collect()
-        st.metric("Patients at Risk", f"{result[0][0]:,}")
-    with col4:
-        result = session.sql("""
-            SELECT COUNT(*) FROM HEALTHCARE_DW.DDI_APP.ALERT_EMAIL_LOG
-        """).collect()
-        st.metric("Alerts Drafted", f"{result[0][0]:,}")
-
-    st.markdown("---")
-    st.subheader("Interaction Severity Distribution")
-    severity_df = session.sql("""
-        SELECT SEVERITY, COUNT(*) AS COUNT
-        FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-        GROUP BY SEVERITY
-        ORDER BY CASE SEVERITY
-            WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
-            WHEN 'MODERATE' THEN 3 ELSE 4 END
-    """).to_pandas()
-    if not severity_df.empty:
-        st.bar_chart(severity_df.set_index("SEVERITY"))
-
-    st.subheader("Most Common Dangerous Drug Pairs")
-    top_pairs = session.sql("""
-        SELECT
-            DRUG_A_NAME || ' + ' || DRUG_B_NAME AS DRUG_PAIR,
-            SEVERITY,
-            COUNT(DISTINCT PATIENT_ID) AS AFFECTED_PATIENTS,
-            CLINICAL_EFFECT
-        FROM HEALTHCARE_DW.DDI_APP.PATIENT_DRUG_INTERACTION_ALERTS
-        WHERE SEVERITY IN ('CRITICAL', 'HIGH')
-        GROUP BY DRUG_A_NAME, DRUG_B_NAME, SEVERITY, CLINICAL_EFFECT
-        ORDER BY AFFECTED_PATIENTS DESC
-        LIMIT 10
-    """).to_pandas()
-    if not top_pairs.empty:
-        st.dataframe(top_pairs, use_container_width=True)
-
-
-# --- Main ---
-if st.session_state.get("role"):
-    show_dashboard()
-else:
+if not role:
     show_login()
+else:
+    page, lang = show_sidebar_nav()
+
+    if page == "Home" or page is None:
+        show_home(lang)
+    elif page == "Provider Dashboard":
+        from views.provider_dashboard import render
+        render(session)
+    elif page == "Patient Portal":
+        from views.patient_portal import render
+        render(session, lang)
+    elif page == "Interaction Checker":
+        from views.interaction_checker import render
+        render(session, lang)
+    elif page == "Chat":
+        from views.chat import render
+        render(session, lang)
