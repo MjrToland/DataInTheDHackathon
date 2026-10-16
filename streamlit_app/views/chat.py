@@ -1,4 +1,4 @@
-"""Chat view."""
+"""Chat view — compatible with older SiS Streamlit (no chat_input/chat_message)."""
 import json
 import requests
 import streamlit as st
@@ -59,25 +59,37 @@ def render(session, lang):
     st.markdown(translate("Ask questions about drug interactions, medications, and patient safety.", lang, session))
     st.caption(translate("All answers are AI-generated and not clinically validated.", lang, session))
 
+    # Chat history display
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
 
-    if prompt := st.chat_input(translate("Ask about medications, interactions, or patients...", lang, session)):
+    for msg in st.session_state.messages:
+        if msg["role"] == "user":
+            st.markdown(f"**You:** {msg['content']}")
+        else:
+            st.markdown(f"**Assistant:** {msg['content']}")
+            st.markdown("---")
+
+    # Input form (works on all Streamlit versions)
+    with st.form("chat_form", clear_on_submit=True):
+        prompt = st.text_area(
+            translate("Ask about medications, interactions, or patients...", lang, session),
+            height=80, key="chat_input_area"
+        )
+        submitted = st.form_submit_button(translate("Send", lang, session), type="primary")
+
+    if submitted and prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        with st.chat_message("assistant"):
-            with st.spinner(translate("Thinking...", lang, session)):
-                try:
-                    answer = call_agent_rest(prompt, session)
-                    if not answer:
-                        answer = call_search_fallback(prompt, session, role, lang)
-                    if lang != "en" and answer:
-                        answer = translate(answer, lang, session)
-                    st.markdown(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
+        st.markdown(f"**You:** {prompt}")
+
+        with st.spinner(translate("Thinking...", lang, session)):
+            try:
+                answer = call_agent_rest(prompt, session)
+                if not answer:
+                    answer = call_search_fallback(prompt, session, role, lang)
+                if lang != "en" and answer:
+                    answer = translate(answer, lang, session)
+                st.markdown(f"**Assistant:** {answer}")
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
