@@ -29,13 +29,19 @@ def call_agent_rest(prompt_text, session):
 
 
 def call_search_fallback(prompt_text, session, role, lang):
-    search_results = session.sql(
-        """SELECT DRUG_A_NAME, DRUG_B_NAME, SEVERITY, CLINICAL_EFFECT, MANAGEMENT, ALTERNATIVE_FOR_A, ALTERNATIVE_FOR_B
-           FROM TABLE(HEALTHCARE_DW.DDI_APP.DRUG_INTERACTION_SEARCH!SEARCH(QUERY => ?, LIMIT => 5))""",
-        params=[prompt_text]
-    ).to_pandas()
-    if not search_results.empty:
-        ctx = "\n".join(f"- {r['DRUG_A_NAME']} + {r['DRUG_B_NAME']} ({r['SEVERITY']}): {r['CLINICAL_EFFECT']}. Management: {r['MANAGEMENT']}" for _, r in search_results.iterrows())
+    safe_query = prompt_text.replace("'", "\\'").replace('"', '\\"')
+    raw = session.sql(
+        f"""SELECT PARSE_JSON(SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+            'HEALTHCARE_DW.DDI_APP.DRUG_INTERACTION_SEARCH',
+            '{{"query": "{safe_query}", "columns": ["DRUG_A_NAME","DRUG_B_NAME","SEVERITY","CLINICAL_EFFECT","MANAGEMENT","ALTERNATIVE_FOR_A","ALTERNATIVE_FOR_B"], "limit": 5}}'
+        )) AS R"""
+    ).collect()
+    results = json.loads(str(raw[0]["R"])).get("results", []) if raw else []
+    if results:
+        ctx = "\n".join(
+            f"- {r['DRUG_A_NAME']} + {r['DRUG_B_NAME']} ({r['SEVERITY']}): {r['CLINICAL_EFFECT']}. Management: {r['MANAGEMENT']}"
+            for r in results
+        )
     else:
         ctx = "No specific drug interaction data found."
     persona = "You are speaking to a patient. Use plain language." if role == "patient" else "You are speaking to a healthcare provider. Use clinical terminology."
